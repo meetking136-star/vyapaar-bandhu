@@ -98,9 +98,58 @@ def handle_text(body: str, sender: str) -> str:
 
 
 def handle_image(media_url: str, sender: str) -> str:
-    """Handle image messages — OCR pipeline comes here in Week 4"""
-    return (
-        "📸 Photo mil gayi! Processing ho rahi hai...\n"
-        "Thoda intezaar karein — 10 seconds mein result aayega! ⏳\n\n"
-        "(OCR pipeline Week 4 mein add hoga)"
-    )
+    """Handle image messages — OCR pipeline"""
+    from app.services.ocr_service import extract_text_from_image_url, parse_invoice_fields
+    from app.services.gstin_validator import validate_gstin
+
+    TWILIO_SID   = os.getenv("TWILIO_ACCOUNT_SID")
+    TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+
+    ocr_result = extract_text_from_image_url(media_url, TWILIO_SID, TWILIO_TOKEN)
+
+    if not ocr_result["success"]:
+        return "Photo padh nahi paya. Dobara try karein — achhi roshni mein photo lein. 📸"
+
+    parsed = parse_invoice_fields(ocr_result["full_text"])
+    fields  = parsed["fields"]
+    confidence = parsed["overall_confidence"]
+
+    gstin_info = ""
+    if fields["seller_gstin"]["value"]:
+        validation = validate_gstin(fields["seller_gstin"]["value"])
+        if validation["is_valid"]:
+            gstin_info = f"Supplier: {validation['state_name']}\n"
+        else:
+            gstin_info = "Supplier GSTIN: Invalid — ITC risk! ⚠️\n"
+
+    if parsed["needs_confirmation"]:
+        msg = "Invoice mil gayi! Kuch details confirm karein:\n\n"
+        if fields["seller_gstin"]["value"]:
+            msg += f"GSTIN: {fields['seller_gstin']['value']}\n"
+        if fields["total_amount"]["value"]:
+            msg += f"Total: Rs.{fields['total_amount']['value']}\n"
+        if fields["cgst"]["value"]:
+            msg += f"CGST: Rs.{fields['cgst']['value']}\n"
+        if fields["sgst"]["value"]:
+            msg += f"SGST: Rs.{fields['sgst']['value']}\n"
+        msg += f"\nConfidence: {int(confidence*100)}%\n"
+        msg += "Sahi hai → 'yes' likhein\nGalat hai → photo dobara bhejein"
+        return msg
+
+    msg = "Invoice process ho gayi! ✅\n\n"
+    msg += gstin_info
+    if fields["invoice_no"]["value"]:
+        msg += f"Invoice No: {fields['invoice_no']['value']}\n"
+    if fields["total_amount"]["value"]:
+        msg += f"Total: Rs.{fields['total_amount']['value']}\n"
+    if fields["cgst"]["value"]:
+        msg += f"CGST: Rs.{fields['cgst']['value']}\n"
+    if fields["sgst"]["value"]:
+        msg += f"SGST: Rs.{fields['sgst']['value']}\n"
+
+    total_tax = (fields["cgst"]["value"] or 0) + (fields["sgst"]["value"] or 0)
+    if total_tax > 0:
+        msg += f"\nITC Add Hua: Rs.{total_tax} ✅"
+
+    msg += "\n\nAur invoices bhejte rahein!"
+    return msg
