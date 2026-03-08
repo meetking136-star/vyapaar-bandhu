@@ -71,9 +71,10 @@ Rules:
                 }
             ]
         }],
-        "max_tokens": 3000,
+        "max_tokens": 5000,
         "temperature": 0,
         "include_reasoning": False,
+        "transforms": [],
     }
 
     try:
