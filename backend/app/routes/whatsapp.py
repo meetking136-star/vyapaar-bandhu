@@ -161,7 +161,6 @@ def process_image_background(media_url: str, sender: str):
 def process_pdf_background(media_url: str, sender: str):
     try:
         import requests as req
-        import os
         from app.services.bank_pdf_parser import parse_bank_statement_from_bytes
 
         TWILIO_SID   = os.getenv("TWILIO_ACCOUNT_SID")
@@ -192,7 +191,6 @@ def process_pdf_background(media_url: str, sender: str):
         msg += f"💰 Total Credit: Rs.{result['total_credit']:,.2f}\n"
         msg += f"📋 ITC Possible: {result['itc_possible_count']} transactions\n\n"
 
-        # Show top 5 ITC-eligible transactions
         itc_txns = [t for t in txns if t.get("itc_possible")][:5]
         if itc_txns:
             msg += "✅ ITC Eligible Transactions:\n"
@@ -302,11 +300,17 @@ def process_confirmed_invoice(sender: str) -> str:
     data   = PENDING_CONFIRMATIONS.pop(sender)
     fields = data["fields"]
 
-    total_tax = (
-        (fields["cgst"]["value"]  or 0) +
-        (fields["sgst"]["value"]  or 0) +
-        (fields["igst"]["value"]  or 0)
-    )
+    # Fix: inter-state (IGST only) vs intra-state (CGST + SGST)
+    igst = fields["igst"]["value"] or 0
+    cgst = fields["cgst"]["value"] or 0
+    sgst = fields["sgst"]["value"] or 0
+
+    if igst > 0:
+        total_tax = igst           # inter-state transaction — IGST only
+        tax_type  = f"IGST: Rs.{igst}"
+    else:
+        total_tax = cgst + sgst    # intra-state transaction
+        tax_type  = f"CGST: Rs.{cgst} + SGST: Rs.{sgst}"
 
     from app.services.invoice_service import save_invoice
     from app.services.classification_service import classify_invoice
@@ -322,7 +326,7 @@ def process_confirmed_invoice(sender: str) -> str:
     if fields["total_amount"]["value"]:
         msg += f"Total: Rs.{fields['total_amount']['value']}\n"
     if total_tax > 0:
-        msg += f"\n💰 ITC Mila: Rs.{round(total_tax, 2)}\n"
+        msg += f"\n💰 ITC Mila: Rs.{round(total_tax, 2)} ({tax_type})\n"
     if db_result.get("success"):
         msg += f"📊 Is Mahine Ka Total ITC: Rs.{db_result['itc_total']}\n"
         msg += f"📄 Invoice ID: #{db_result['invoice_id']}\n"
