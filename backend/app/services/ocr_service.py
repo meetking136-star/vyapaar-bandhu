@@ -59,13 +59,15 @@ Extract these fields and return ONLY a valid JSON object. No explanation, no mar
   "cgst": numeric CGST tax rupee amount (NOT percentage) or null,
   "sgst": numeric SGST tax rupee amount (NOT percentage) or null,
   "igst": numeric IGST tax rupee amount (NOT percentage) or null,
-  "total_amount": numeric grand total rupee amount or null
+  "total_amount": numeric grand total rupee amount or null,
+  "description": "product or item name from the invoice, e.g. DELL Inspiron Laptop, Office Chair, Paracetamol 500mg — or null if not found"
 }
 
 Rules:
 - GSTIN is always exactly 15 characters
 - Extract tax AMOUNTS in rupees, never percentages
 - total_amount is the Grand Total
+- description should be the main product/service name — keep it short, 3-8 words
 - Return null for missing fields
 - Return ONLY the JSON object, nothing else"""
                 }
@@ -106,7 +108,8 @@ Rules:
 
         fields = {}
         for key in ["seller_gstin", "invoice_no", "invoice_date",
-                    "taxable_amount", "cgst", "sgst", "igst", "total_amount"]:
+                    "taxable_amount", "cgst", "sgst", "igst", "total_amount",
+                    "description"]:
             val = extracted.get(key)
             fields[key] = {"value": val, "confidence": 0.93 if val is not None else 0}
 
@@ -115,6 +118,8 @@ Rules:
 
         print(f"📊 Fields: {[(k, v['value']) for k, v in fields.items() if v['value']]}")
         print(f"📊 Confidence: {avg:.2f} | Filled: {len(filled)}/{len(fields)}")
+        if fields.get("description", {}).get("value"):
+            print(f"🏷️  Description: {fields['description']['value']}")
 
         return {
             "success": True,
