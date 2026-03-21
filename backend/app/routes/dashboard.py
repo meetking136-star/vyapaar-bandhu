@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.core.database import get_db
@@ -7,6 +7,8 @@ from app.models.base import Invoice, GSTLedger, User
 from datetime import datetime
 from pydantic import BaseModel
 import io
+import json
+import os
 
 try:
     from reportlab.lib.pagesizes import A4
@@ -85,7 +87,175 @@ def create_client(client: ClientCreate, db: Session = Depends(get_db)):
         db.add(user)
         db.commit()
         db.refresh(user)
+
+        # Auto-send WhatsApp welcome message
+        try:
+            from twilio.rest import Client as TwilioClient
+            twilio = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+            phone = client.phone if client.phone.startswith("+") else f"+91{client.phone}"
+            twilio.messages.create(
+                from_="whatsapp:+14155238886",
+                to=f"whatsapp:{phone}",
+                body=f"Namaste! {client.name} 🙏\n\nAapke CA ne aapko VyapaarBandhu se connect kiya hai.\n\nAb aap apni invoices ki photo yahan bhej sakte hain aur hum automatically ITC calculate karenge.\n\nShuru karne ke liye 'hello' likhiye ya invoice ki photo bhejiye!\n\nVyapaarBandhu 🤝"
+            )
+        except Exception as wa_err:
+            print(f"WhatsApp welcome skipped: {wa_err}")
+
         return {"success": True, "id": str(user.id)}
+    except Exception as e:
+        return {"error": str(e)}
+
+@router.post("/clients/{client_id}/remind")
+def send_reminder(client_id: int, db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.id == client_id).first()
+        if not user:
+            return {"error": "Client not found"}
+        from twilio.rest import Client as TwilioClient
+        twilio = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+        phone = user.phone if user.phone.startswith("+") else f"+91{user.phone}"
+        twilio.messages.create(
+            from_="whatsapp:+14155238886",
+            to=f"whatsapp:{phone}",
+            body=f"Namaste {user.business_name or 'ji'} 🙏\n\nGSTR-3B filing ki deadline nazdeek aa rahi hai!\n\nKripya apni baaki invoices upload karein taaki ITC claim ho sake.\n\nVyapaarBandhu 📊"
+        )
+        return {"success": True, "message": f"Reminder sent to {user.phone}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@router.get("/clients/{client_id}/gstr3b-json")
+def get_gstr3b_json(client_id: int, db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.id == client_id).first()
+        if not user:
+            return {"error": "Client not found"}
+
+        period = datetime.now().strftime("%Y-%m")
+        invoices = db.query(Invoice).filter(
+            Invoice.user_id == client_id,
+            Invoice.status == "confirmed"
+        ).all()
+
+        # Separate intra-state (CGST+SGST) vs inter-state (IGST)
+        intra_taxable = 0.0
+        intra_cgst = 0.0
+        intra_sgst = 0.0
+        inter_taxable = 0.0
+        inter_igst = 0.0
+        total_itc = 0.0
+
+        for inv in invoices:
+            cgst = float(inv.cgst or 0)
+            sgst = float(inv.sgst or 0)
+            igst = float(inv.igst or 0)
+            taxable = float(inv.taxable_amt or 0)
+
+            if igst > 0:
+                inter_taxable += taxable
+                inter_igst += igst
+            else:
+                intra_taxable += taxable
+                intra_cgst += cgst
+                intra_sgst += sgst
+
+            total_itc += cgst + sgst + igst
+
+        net_liability = max(0, 0 - total_itc)  # simplified: no outward supplies yet
+
+        # GSTN GSTR-3B format
+        gstr3b = {
+            "gstin": user.gstin or "",
+            "ret_period": datetime.now().strftime("%m%Y"),
+            "filing_period": period,
+            "generated_by": "VyapaarBandhu",
+            "generated_at": datetime.now().isoformat(),
+            "sup_details": {
+                "osup_det": {
+                    "txval": 0,
+                    "iamt": 0,
+                    "camt": 0,
+                    "samt": 0,
+                    "csamt": 0
+                },
+                "osup_zero": {
+                    "txval": 0,
+                    "iamt": 0,
+                    "csamt": 0
+                },
+                "osup_nil_exmp": {
+                    "txval": 0
+                },
+                "isup_rev": {
+                    "txval": 0,
+                    "iamt": 0,
+                    "camt": 0,
+                    "samt": 0,
+                    "csamt": 0
+                },
+                "osup_nongst": {
+                    "txval": 0
+                }
+            },
+            "inter_sup": {
+                "unreg_details": [],
+                "comp_details": [],
+                "uin_details": []
+            },
+            "itc_elg": {
+                "itc_avl": [
+                    {
+                        "ty": "IMPG",
+                        "iamt": round(inter_igst, 2),
+                        "camt": round(intra_cgst, 2),
+                        "samt": round(intra_sgst, 2),
+                        "csamt": 0
+                    }
+                ],
+                "itc_rev": [],
+                "itc_net": {
+                    "iamt": round(inter_igst, 2),
+                    "camt": round(intra_cgst, 2),
+                    "samt": round(intra_sgst, 2),
+                    "csamt": 0
+                },
+                "itc_inelg": [
+                    {"ty": "RUL", "iamt": 0, "camt": 0, "samt": 0, "csamt": 0}
+                ]
+            },
+            "inward_sup": {
+                "isup_details": [
+                    {
+                        "ty": "GST",
+                        "inter": round(inter_taxable, 2),
+                        "intra": round(intra_taxable, 2)
+                    }
+                ]
+            },
+            "tax_liability": {
+                "net_itc": round(total_itc, 2),
+                "net_liability": round(net_liability, 2),
+                "summary": {
+                    "total_invoices": len(invoices),
+                    "intra_state_invoices": len([i for i in invoices if (i.igst or 0) == 0]),
+                    "inter_state_invoices": len([i for i in invoices if (i.igst or 0) > 0]),
+                    "total_taxable_value": round(intra_taxable + inter_taxable, 2),
+                    "total_cgst": round(intra_cgst, 2),
+                    "total_sgst": round(intra_sgst, 2),
+                    "total_igst": round(inter_igst, 2),
+                    "total_itc_eligible": round(total_itc, 2)
+                }
+            }
+        }
+
+        json_bytes = json.dumps(gstr3b, indent=2).encode("utf-8")
+        filename = f"GSTR3B_{user.gstin or client_id}_{datetime.now().strftime('%m%Y')}.json"
+
+        return StreamingResponse(
+            io.BytesIO(json_bytes),
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
     except Exception as e:
         return {"error": str(e)}
 
@@ -187,7 +357,7 @@ def get_invoices(db: Session = Depends(get_db)):
             result.append({
                 "id": str(inv.id),
                 "clientId": str(inv.user_id),
-                "clientName": user.business_name or user.phone or "Unknown" if user else "Unknown",
+                "clientName": (user.business_name or user.phone or "Unknown") if user else "Unknown",
                 "invoiceNo": inv.invoice_no or "",
                 "date": str(inv.date or ""),
                 "supplierGstin": inv.seller_gstin or "",
@@ -259,5 +429,38 @@ def get_alerts(db: Session = Depends(get_db)):
                     "resolved": False
                 })
         return alerts
+    except Exception as e:
+        return {"error": str(e)}
+
+@router.get("/admin/stats")
+def get_admin_stats(db: Session = Depends(get_db)):
+    try:
+        total_users = db.query(func.count(User.id)).scalar() or 0
+        total_invoices = db.query(func.count(Invoice.id)).scalar() or 0
+        total_itc = db.query(func.sum(GSTLedger.itc_available)).scalar() or 0
+        confirmed = db.query(func.count(Invoice.id)).filter(Invoice.status == "confirmed").scalar() or 0
+        pending = db.query(func.count(Invoice.id)).filter(Invoice.status == "pending").scalar() or 0
+        users = db.query(User).order_by(User.id.desc()).all()
+        user_list = []
+        for u in users:
+            inv_count = db.query(func.count(Invoice.id)).filter(Invoice.user_id == u.id).scalar() or 0
+            user_list.append({
+                "id": str(u.id),
+                "name": u.business_name or "Unknown",
+                "phone": u.phone or "",
+                "gstin": u.gstin or "",
+                "state": u.state_code or "",
+                "invoiceCount": inv_count,
+                "joinedAt": str(u.created_at or "")[:10]
+            })
+        return {
+            "total_users": total_users,
+            "total_invoices": total_invoices,
+            "total_itc": round(float(total_itc), 2),
+            "confirmed_invoices": confirmed,
+            "pending_invoices": pending,
+            "mrr": total_users * 299,
+            "users": user_list
+        }
     except Exception as e:
         return {"error": str(e)}
