@@ -96,10 +96,10 @@ def build_gstr3b_json(data: GSTR3BInput) -> dict:
         iamt=data.igst_rejected,
     )
 
-    # ITC net = available minus reversed
-    net_samt = data.sgst_confirmed - data.sgst_rejected
-    net_camt = data.cgst_confirmed - data.cgst_rejected
-    net_iamt = data.igst_confirmed - data.igst_rejected
+    # ITC net = available minus reversed (clamped to zero -- negative ITC net is invalid)
+    net_samt = max(data.sgst_confirmed - data.sgst_rejected, ZERO)
+    net_camt = max(data.cgst_confirmed - data.cgst_rejected, ZERO)
+    net_iamt = max(data.igst_confirmed - data.igst_rejected, ZERO)
 
     # Inward supply details
     intra_total = data.cgst_confirmed + data.sgst_confirmed

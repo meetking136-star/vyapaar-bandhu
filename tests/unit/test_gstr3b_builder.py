@@ -243,6 +243,22 @@ class TestBuildGSTR3BJSON:
         result = build_gstr3b_json(data)
         assert result["gstin"] == ""
 
+    def test_itc_net_clamped_to_zero_when_negative(self):
+        """If reversed > available, itc_net must be 0.00 not negative."""
+        data = self._default_input(
+            cgst_confirmed=Decimal("100.00"),
+            sgst_confirmed=Decimal("100.00"),
+            igst_confirmed=Decimal("50.00"),
+            cgst_rejected=Decimal("200.00"),  # More than confirmed
+            sgst_rejected=Decimal("300.00"),
+            igst_rejected=Decimal("100.00"),
+        )
+        result = build_gstr3b_json(data)
+        net = result["itc_elg"]["itc_net"]
+        assert net["camt"] == "0.00"  # Would be -100 without clamp
+        assert net["samt"] == "0.00"  # Would be -200 without clamp
+        assert net["iamt"] == "0.00"  # Would be -50 without clamp
+
     def test_no_float_in_entire_output(self):
         """Deep check: no float type anywhere in the output dict."""
         data = self._default_input()
