@@ -53,13 +53,23 @@ celery_app.conf.update(
                 "minute": 0,
             },
         },
+        "daily-reprocess-failed-invoices": {
+            "task": "app.tasks.ocr_tasks.reprocess_failed_invoices",
+            "schedule": {
+                # 20:30 UTC = 2:00 AM IST
+                "__type__": "crontab",
+                "hour": 20,
+                "minute": 30,
+            },
+        },
     },
 
     # ── Task routing ───────────────────────────────────────────────
     task_routes={
-        "app.tasks.ocr_task.*": {"queue": "ocr"},
+        "app.tasks.ocr_tasks.*": {"queue": "ocr"},
         "app.tasks.reminder_task.*": {"queue": "default"},
         "app.tasks.summary_task.*": {"queue": "default"},
+        "app.tasks.whatsapp_task.*": {"queue": "default"},
     },
 )
 

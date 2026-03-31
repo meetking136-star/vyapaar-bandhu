@@ -1,10 +1,11 @@
 """
-VyapaarBandhu — GSTIN Validator with Modulo 36 Checksum
+VyapaarBandhu -- GSTIN Validator with Modulo 36 Checksum
 Refactored from the original gstin_validator.py to use dataclass output.
 
 Handles OCR confusion pairs (I/1, O/0, S/5, B/8, Z/2, G/6, A/4)
 and attempts single-character auto-correction.
 """
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
@@ -43,19 +44,26 @@ class GSTINValidationResult:
 
 
 def calculate_gstin_checksum(gstin_14: str) -> str:
-    """Calculate Modulo 36 checksum for first 14 chars of GSTIN."""
-    factor = 2
+    """
+    Calculate Modulo 36 checksum for first 14 chars of GSTIN.
+
+    Per GST specification: character set is 0-9 then A-Z (36 chars).
+    Odd positions (1-indexed) multiplied by 1, even by 2.
+    If product >= 36, reduce by (product // 36) + (product % 36).
+    Checksum = CHARSET[36 - (total % 36)], or CHARSET[0] if total % 36 == 0.
+    """
     total = 0
-    for char in reversed(gstin_14):
+    for i, char in enumerate(gstin_14.upper()):
         if char not in GSTIN_CHAR_MAP:
             return "?"
-        digit = GSTIN_CHAR_MAP.index(char)
-        val = factor * digit
-        total += (val // 36) + (val % 36)
-        factor = 3 if factor == 2 else 2
+        val = GSTIN_CHAR_MAP.index(char)
+        factor = 2 if (i + 1) % 2 == 0 else 1
+        p = val * factor
+        if p >= 36:
+            p = (p // 36) + (p % 36)
+        total += p
     remainder = total % 36
-    check = (36 - remainder) % 36
-    return GSTIN_CHAR_MAP[check]
+    return GSTIN_CHAR_MAP[0] if remainder == 0 else GSTIN_CHAR_MAP[36 - remainder]
 
 
 def _verify_checksum(gstin: str) -> bool:

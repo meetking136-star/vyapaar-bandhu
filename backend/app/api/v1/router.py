@@ -11,6 +11,7 @@ from app.api.v1.webhooks import router as webhooks_router
 from app.api.v1.ca_dashboard import router as ca_dashboard_router
 from app.api.v1.invoices import router as invoices_router
 from app.api.v1.exports import router as exports_router
+from app.api.v1.whatsapp import router as whatsapp_router
 
 api_v1_router = APIRouter()
 
@@ -31,6 +32,9 @@ api_v1_router.include_router(invoices_router, prefix="/invoices", tags=["Invoice
 
 # ── Exports ────────────────────────────────────────────────────────────
 api_v1_router.include_router(exports_router, prefix="/exports", tags=["Exports"])
+
+# ── WhatsApp (Phase 4) ────────────────────────────────────────────────
+api_v1_router.include_router(whatsapp_router, prefix="/whatsapp", tags=["WhatsApp"])
 
 
 @api_v1_router.get("/", tags=["Health"])

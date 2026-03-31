@@ -1,13 +1,14 @@
 """
-VyapaarBandhu — Invoice Endpoints
-List, detail, approve, reject, override. CA-scoped with audit trail.
+VyapaarBandhu -- Invoice Endpoints
+Upload, status, raw URL, list, detail, approve, reject, override.
+CA-scoped with audit trail.
 """
 
 import uuid
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,12 +21,190 @@ from app.schemas.invoice import (
     InvoiceOverrideRequest,
     InvoiceRejectRequest,
     InvoiceResponse,
+    InvoiceUploadResponse,
+    InvoiceStatusResponse,
+    InvoiceRawURLResponse,
 )
 from app.utils.audit import write_audit_log
 
 logger = structlog.get_logger()
 router = APIRouter()
 
+# Allowed file types for invoice upload
+ALLOWED_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "application/pdf",
+}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+# ── Phase 3: Upload, Status, Raw endpoints ────────────────────────────
+
+@router.post("/upload", response_model=InvoiceUploadResponse, status_code=202)
+async def upload_invoice(
+    ca: CurrentCA,
+    db: AsyncSession = Depends(get_async_session),
+    file: UploadFile = File(...),
+    client_id: uuid.UUID = Form(...),
+    filing_period: str = Form(...),
+):
+    """
+    Upload an invoice image for OCR processing.
+    Auth: CA JWT required.
+    Body: multipart/form-data (file + client_id + filing_period).
+    Returns 202 with invoice_id and status=queued.
+    """
+    from app.models.client import Client
+    from app.utils.consent import assert_client_consent
+    from app.services.storage.s3_client import upload_invoice_image
+    from app.utils.dedup import compute_dedup_hash
+
+    # Validate file type
+    if file.content_type not in ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{file.content_type}' not allowed. "
+                   f"Accepted: {', '.join(ALLOWED_CONTENT_TYPES)}",
+        )
+
+    # Read file bytes and check size
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB",
+        )
+
+    # Verify client belongs to this CA
+    result = await db.execute(
+        select(Client).where(Client.id == client_id, Client.ca_id == ca.id)
+    )
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found or not owned by this CA")
+
+    # Assert client consent (DPDP Act -- RULE 5)
+    from app.utils.consent import ConsentNotGivenError, ConsentWithdrawnError
+    try:
+        await assert_client_consent(db, client_id)
+    except (ConsentNotGivenError, ConsentWithdrawnError) as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+    # Upload raw file to S3
+    s3_key = await upload_invoice_image(file_bytes, client_id)
+
+    # Create a temporary dedup hash (will be updated after OCR extracts fields)
+    temp_dedup = compute_dedup_hash(None, None, client_id, s3_key)
+
+    # Create invoice record in "queued" state
+    invoice = Invoice(
+        client_id=client_id,
+        ca_id=ca.id,
+        image_s3_key=s3_key,
+        source_type="api_upload",
+        filing_period=filing_period,
+        status="queued",
+        dedup_hash=temp_dedup,
+    )
+    db.add(invoice)
+    await db.commit()
+    await db.refresh(invoice)
+
+    # Queue Celery task for OCR processing
+    from app.tasks.ocr_tasks import process_invoice
+    process_invoice.delay(
+        invoice_id=str(invoice.id),
+        client_id=str(client_id),
+        ca_id=str(ca.id),
+        filing_period=filing_period,
+        image_s3_key=s3_key,
+    )
+
+    logger.info(
+        "invoice.upload.queued",
+        invoice_id=str(invoice.id),
+        client_id=str(client_id),
+        ca_id=str(ca.id),
+        file_size=len(file_bytes),
+    )
+
+    return InvoiceUploadResponse(
+        invoice_id=invoice.id,
+        status="queued",
+        estimated_seconds=30,
+    )
+
+
+@router.get("/{invoice_id}/status", response_model=InvoiceStatusResponse)
+async def get_invoice_status(
+    invoice_id: uuid.UUID,
+    ca: CurrentCA,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get processing status of an invoice.
+    Returns extracted fields if processing is complete.
+    """
+    result = await db.execute(
+        select(Invoice).where(Invoice.id == invoice_id, Invoice.ca_id == ca.id)
+    )
+    invoice = result.scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    return InvoiceStatusResponse(
+        invoice_id=invoice.id,
+        status=invoice.status,
+        extracted_fields=invoice.extracted_fields_json,
+        confidence_scores=invoice.ocr_confidence_json,
+        low_confidence_fields=invoice.low_confidence_fields,
+        classification=invoice.classification_json,
+        is_rcm=invoice.is_rcm,
+        rcm_category=invoice.rcm_category,
+        ocr_provider=invoice.ocr_engine_used,
+        processing_attempts=invoice.processing_attempts or 0,
+        last_error_message=invoice.last_error_message,
+        created_at=invoice.created_at,
+        processed_at=invoice.ca_reviewed_at,
+    )
+
+
+@router.get("/{invoice_id}/raw", response_model=InvoiceRawURLResponse)
+async def get_invoice_raw_url(
+    invoice_id: uuid.UUID,
+    ca: CurrentCA,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Get a presigned S3 URL to the raw invoice image.
+    Never streams the file through the API server.
+    Expiry: 1 hour.
+    """
+    from app.services.storage.s3_client import generate_presigned_url
+    from app.config import settings
+
+    result = await db.execute(
+        select(Invoice).where(Invoice.id == invoice_id, Invoice.ca_id == ca.id)
+    )
+    invoice = result.scalar_one_or_none()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+
+    presigned_url = generate_presigned_url(
+        bucket=settings.S3_BUCKET_INVOICES,
+        key=invoice.image_s3_key,
+        expiry=3600,  # 1 hour
+    )
+
+    return InvoiceRawURLResponse(
+        invoice_id=invoice.id,
+        presigned_url=presigned_url,
+        expires_in_seconds=3600,
+    )
+
+
+# ── Existing endpoints (from Phase 2) ────────────────────────────────
 
 @router.get("/", response_model=list[InvoiceResponse])
 async def list_invoices(
