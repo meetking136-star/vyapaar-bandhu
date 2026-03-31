@@ -4,16 +4,19 @@ CA-scoped: a CA can only see/modify their own clients.
 """
 
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, func
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select, func, case, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_async_session
 from app.dependencies import CurrentCA
 from app.models.client import Client
+from app.models.invoice import Invoice
 from app.schemas.client import ClientCreateRequest, ClientResponse, ClientUpdateRequest
+from app.schemas.summary import ITCSummaryResponse
 from app.services.compliance.gstin_state_mapper import get_state_from_gstin
 from app.utils.audit import write_audit_log
 from app.utils.phone import normalize_phone
@@ -183,3 +186,130 @@ async def deactivate_client(
         entity_id=client.id,
     )
     await db.commit()
+
+
+# ── Phase 5: ITC Summary endpoint ─────────────────────────────────────
+
+ZERO = Decimal("0.00")
+TWO_PLACES = Decimal("0.01")
+
+
+def _q(val: Decimal | None) -> str:
+    """Quantize a Decimal to 2 places with ROUND_HALF_UP, return as string."""
+    if val is None:
+        return str(ZERO)
+    return str(Decimal(str(val)).quantize(TWO_PLACES, rounding=ROUND_HALF_UP))
+
+
+@router.get("/{client_id}/itc-summary", response_model=ITCSummaryResponse)
+async def get_client_itc_summary(
+    client_id: uuid.UUID,
+    ca: CurrentCA,
+    db: AsyncSession = Depends(get_async_session),
+    period: str = Query(..., regex=r"^\d{2}-\d{4}$", description="MM-YYYY"),
+):
+    """
+    ITC summary for a single client for a given period.
+    All monetary values as string Decimal, never float.
+
+    ITC formula:
+        confirmed = sum(cgst+sgst+igst) WHERE status IN (ca_approved, ca_overridden)
+                    AND is_itc_eligible_draft=True
+                    AND ca_override_itc_eligible IS NOT False
+        pending = same but status IN (processing, pending_ca_review, pending_client_confirmation)
+        rejected = is_itc_eligible_draft=False OR ca_override_itc_eligible=False
+        rcm_liability = sum(taxable_value) WHERE is_rcm=True
+    """
+    # Verify client belongs to this CA
+    client_result = await db.execute(
+        select(Client).where(Client.id == client_id, Client.ca_id == ca.id)
+    )
+    client = client_result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    # Single aggregation query
+    result = await db.execute(
+        select(
+            # Confirmed CGST
+            func.coalesce(func.sum(case(
+                (and_(
+                    Invoice.status.in_(["ca_approved", "ca_overridden"]),
+                    Invoice.is_itc_eligible_draft == True,
+                    Invoice.ca_override_itc_eligible != False,
+                ), Invoice.cgst_amount),
+                else_=Decimal("0"),
+            )), Decimal("0")).label("cgst_confirmed"),
+
+            # Confirmed SGST
+            func.coalesce(func.sum(case(
+                (and_(
+                    Invoice.status.in_(["ca_approved", "ca_overridden"]),
+                    Invoice.is_itc_eligible_draft == True,
+                    Invoice.ca_override_itc_eligible != False,
+                ), Invoice.sgst_amount),
+                else_=Decimal("0"),
+            )), Decimal("0")).label("sgst_confirmed"),
+
+            # Confirmed IGST
+            func.coalesce(func.sum(case(
+                (and_(
+                    Invoice.status.in_(["ca_approved", "ca_overridden"]),
+                    Invoice.is_itc_eligible_draft == True,
+                    Invoice.ca_override_itc_eligible != False,
+                ), Invoice.igst_amount),
+                else_=Decimal("0"),
+            )), Decimal("0")).label("igst_confirmed"),
+
+            # Pending ITC total
+            func.coalesce(func.sum(case(
+                (and_(
+                    Invoice.status.in_(["processing", "pending_ca_review", "pending_client_confirmation"]),
+                    Invoice.is_itc_eligible_draft == True,
+                ), Invoice.cgst_amount + Invoice.sgst_amount + Invoice.igst_amount),
+                else_=Decimal("0"),
+            )), Decimal("0")).label("total_pending"),
+
+            # Rejected ITC total
+            func.coalesce(func.sum(case(
+                (and_(
+                    Invoice.status.in_(["ca_approved", "ca_overridden", "ca_rejected"]),
+                    (Invoice.is_itc_eligible_draft == False) | (Invoice.ca_override_itc_eligible == False),
+                ), Invoice.cgst_amount + Invoice.sgst_amount + Invoice.igst_amount),
+                else_=Decimal("0"),
+            )), Decimal("0")).label("total_rejected"),
+
+            # RCM liability
+            func.coalesce(func.sum(case(
+                (Invoice.is_rcm == True, Invoice.taxable_amount),
+                else_=Decimal("0"),
+            )), Decimal("0")).label("rcm_liability"),
+
+            # Invoice count
+            func.count(Invoice.id).label("invoice_count"),
+        )
+        .where(
+            Invoice.client_id == client_id,
+            Invoice.ca_id == ca.id,
+            Invoice.filing_period == period,
+        )
+    )
+    row = result.one()
+
+    cgst_confirmed = Decimal(str(row.cgst_confirmed or 0))
+    sgst_confirmed = Decimal(str(row.sgst_confirmed or 0))
+    igst_confirmed = Decimal(str(row.igst_confirmed or 0))
+    total_confirmed = cgst_confirmed + sgst_confirmed + igst_confirmed
+
+    return ITCSummaryResponse(
+        client_id=client_id,
+        period=period,
+        cgst_confirmed=_q(cgst_confirmed),
+        sgst_confirmed=_q(sgst_confirmed),
+        igst_confirmed=_q(igst_confirmed),
+        total_confirmed=_q(total_confirmed),
+        total_pending=_q(Decimal(str(row.total_pending or 0))),
+        total_rejected=_q(Decimal(str(row.total_rejected or 0))),
+        rcm_liability=_q(Decimal(str(row.rcm_liability or 0))),
+        invoice_count=row.invoice_count or 0,
+    )

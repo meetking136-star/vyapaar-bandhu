@@ -1,13 +1,13 @@
 """
 VyapaarBandhu — CA Dashboard API
-Traffic light overview, client status grid.
+Traffic light overview, client status grid, summary, alerts.
 """
 
 from datetime import date
 from decimal import Decimal
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +15,16 @@ from app.db.session import get_async_session
 from app.dependencies import CurrentCA
 from app.models.client import Client
 from app.models.invoice import Invoice
-from app.schemas.summary import ClientStatusItem, DashboardOverviewResponse
+from app.schemas.summary import (
+    ClientStatusItem,
+    DashboardOverviewResponse,
+    DashboardSummaryResponse,
+    AlertItem,
+    AlertsResponse,
+)
 from app.services.compliance.deadline_calculator import get_gstr3b_deadline
+from app.services.dashboard.alert_engine import generate_alerts
+from app.services.dashboard.summary_builder import build_period_summary
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -119,17 +127,47 @@ async def dashboard_overview(
     )
 
 
+@router.get("/summary", response_model=DashboardSummaryResponse)
+async def dashboard_summary(
+    ca: CurrentCA,
+    db: AsyncSession = Depends(get_async_session),
+    period: str = Query(..., regex=r"^\d{2}-\d{4}$", description="MM-YYYY"),
+):
+    """
+    Aggregated ITC summary for a CA across all clients for a given period.
+    Single aggregation query -- no N+1 loops.
+    """
+    summary = await build_period_summary(db, ca_id=ca.id, period=period)
+    return summary
+
+
+@router.get("/alerts", response_model=AlertsResponse)
+async def dashboard_alerts(
+    ca: CurrentCA,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Generate compliance alerts for the CA's clients.
+    Checks deadlines, flagged invoices, missing filings.
+    """
+    alerts = await generate_alerts(db, ca_id=ca.id)
+    return AlertsResponse(alerts=alerts, total=len(alerts))
+
+
 def _compute_status(
     inv_count: int,
     pending_count: int,
     flagged_count: int,
     days_to_deadline: int,
 ) -> tuple[str, str]:
-    """Deterministic traffic light status computation."""
-    if days_to_deadline <= 3:
-        return "red", f"GSTR-3B deadline in {days_to_deadline} days"
+    """Deterministic traffic light status computation.
+    CRITICAL: flagged+deadline<=3 check MUST come before bare deadline<=3
+    to produce a more specific reason string.
+    """
     if flagged_count > 0 and days_to_deadline <= 3:
         return "red", f"{flagged_count} flagged invoices, deadline in {days_to_deadline} days"
+    if days_to_deadline <= 3:
+        return "red", f"GSTR-3B deadline in {days_to_deadline} days"
     if flagged_count > 0:
         return "yellow", f"{flagged_count} invoices flagged for review"
     if pending_count > 0 and days_to_deadline <= 6:

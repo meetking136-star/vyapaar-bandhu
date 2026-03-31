@@ -25,6 +25,7 @@ from app.schemas.invoice import (
     InvoiceStatusResponse,
     InvoiceRawURLResponse,
 )
+from app.schemas.summary import BulkActionRequest, BulkActionResponse
 from app.utils.audit import write_audit_log
 
 logger = structlog.get_logger()
@@ -400,3 +401,103 @@ async def override_invoice(
     await db.commit()
     await db.refresh(invoice)
     return invoice
+
+
+# ── Phase 5: Bulk action endpoint ─────────────────────────────────────
+
+BULK_ACTION_STATUS_MAP = {
+    "approve": "ca_approved",
+    "reject": "ca_rejected",
+    "flag": "flagged_low_confidence",
+}
+MAX_BULK_SIZE = 50
+
+
+@router.post("/bulk-action", response_model=BulkActionResponse)
+async def bulk_action_invoices(
+    req: BulkActionRequest,
+    ca: CurrentCA,
+    db: AsyncSession = Depends(get_async_session),
+):
+    """
+    Bulk approve/reject/flag invoices.
+    Max 50 invoices per request -- rejects 400 if more.
+    CA isolation check on every invoice_id.
+    """
+    if len(req.invoice_ids) > MAX_BULK_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {MAX_BULK_SIZE} invoices per bulk action request",
+        )
+
+    target_status = BULK_ACTION_STATUS_MAP.get(req.action)
+    if not target_status:
+        raise HTTPException(status_code=400, detail=f"Invalid action: {req.action}")
+
+    # Fetch all invoices in one query, filtered by CA
+    result = await db.execute(
+        select(Invoice).where(
+            Invoice.id.in_(req.invoice_ids),
+            Invoice.ca_id == ca.id,
+        )
+    )
+    invoices = result.scalars().all()
+
+    # Build a set of found IDs for error reporting
+    found_ids = {inv.id for inv in invoices}
+    now = datetime.now(timezone.utc)
+
+    processed = 0
+    failed = 0
+    results = []
+
+    for invoice_id in req.invoice_ids:
+        if invoice_id not in found_ids:
+            failed += 1
+            results.append({
+                "invoice_id": str(invoice_id),
+                "success": False,
+                "error": "Invoice not found or not owned by this CA",
+            })
+            continue
+
+        # Find the invoice object
+        invoice = next(inv for inv in invoices if inv.id == invoice_id)
+        old_status = invoice.status
+        invoice.status = target_status
+        invoice.ca_reviewed_by = ca.id
+        invoice.ca_reviewed_at = now
+
+        await write_audit_log(
+            db,
+            actor_type="ca",
+            actor_id=ca.id,
+            action=f"invoice.bulk_{req.action}",
+            entity_type="invoice",
+            entity_id=invoice.id,
+            old_value={"status": old_status},
+            new_value={"status": target_status},
+        )
+
+        processed += 1
+        results.append({
+            "invoice_id": str(invoice_id),
+            "success": True,
+            "new_status": target_status,
+        })
+
+    await db.commit()
+
+    logger.info(
+        "invoices.bulk_action",
+        ca_id=str(ca.id),
+        action=req.action,
+        processed=processed,
+        failed=failed,
+    )
+
+    return BulkActionResponse(
+        processed=processed,
+        failed=failed,
+        results=results,
+    )

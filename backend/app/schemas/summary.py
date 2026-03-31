@@ -8,7 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class ClientStatusItem(BaseModel):
@@ -60,3 +60,66 @@ class MonthlySummaryResponse(BaseModel):
     is_filed: bool
 
     model_config = {"from_attributes": True}
+
+
+class DashboardSummaryResponse(BaseModel):
+    """Aggregated ITC summary across all clients for a period."""
+    period: str
+    cgst_confirmed: str  # Decimal as string, never float
+    sgst_confirmed: str
+    igst_confirmed: str
+    total_confirmed: str
+    total_pending: str
+    total_rejected: str
+    rcm_liability: str
+    invoice_count: int
+
+
+class AlertItem(BaseModel):
+    """Single compliance alert."""
+    type: str
+    severity: Literal["red", "yellow", "green"]
+    message: str
+    client_id: str | None = None
+    client_name: str | None = None
+    created_at: str
+
+
+class AlertsResponse(BaseModel):
+    """List of compliance alerts."""
+    alerts: list[AlertItem]
+    total: int
+
+
+class ITCSummaryResponse(BaseModel):
+    """ITC summary for a single client for a period."""
+    client_id: uuid.UUID
+    period: str
+    cgst_confirmed: str
+    sgst_confirmed: str
+    igst_confirmed: str
+    total_confirmed: str
+    total_pending: str
+    total_rejected: str
+    rcm_liability: str
+    invoice_count: int
+
+
+class BulkActionRequest(BaseModel):
+    """Request body for bulk invoice actions."""
+    invoice_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=50)
+    action: Literal["approve", "reject", "flag"]
+
+    @field_validator("invoice_ids")
+    @classmethod
+    def validate_invoice_count(cls, v: list[uuid.UUID]) -> list[uuid.UUID]:
+        if len(v) > 50:
+            raise ValueError("Maximum 50 invoices per bulk action request")
+        return v
+
+
+class BulkActionResponse(BaseModel):
+    """Response for bulk invoice actions."""
+    processed: int
+    failed: int
+    results: list[dict]
