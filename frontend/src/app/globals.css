@@ -1,0 +1,83 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg-primary: #060B18;
+    --bg-surface: #0D1528;
+    --gold: #F5A623;
+  }
+
+  body {
+    @apply bg-bg-primary text-white font-outfit antialiased;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(245, 166, 35, 0.3) transparent;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-bg-card backdrop-blur-[12px] border border-white/5 rounded-xl;
+  }
+
+  .gold-gradient {
+    background: linear-gradient(135deg, #F5A623 0%, #D4901E 100%);
+  }
+
+  .gold-text {
+    @apply text-transparent bg-clip-text;
+    background: linear-gradient(135deg, #F5A623, #F7B84E);
+  }
+
+  .status-pill {
+    @apply px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .status-green { @apply bg-status-green/15 text-status-green; }
+  .status-yellow { @apply bg-status-yellow/15 text-status-yellow; }
+  .status-red { @apply bg-status-red/15 text-status-red; }
+
+  .skeleton {
+    @apply animate-pulse bg-white/5 rounded;
+  }
+}
+
+/* Gradient background orbs */
+.gradient-orb {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.15;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.gradient-orb-1 {
+  width: 400px;
+  height: 400px;
+  background: #F5A623;
+  top: -100px;
+  right: -100px;
+  animation: gradientOrb 15s ease-in-out infinite alternate;
+}
+
+.gradient-orb-2 {
+  width: 300px;
+  height: 300px;
+  background: #2563EB;
+  bottom: -50px;
+  left: -50px;
+  animation: gradientOrb 20s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes gradientOrb {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(30px, -20px) scale(1.1); }
+  100% { transform: translate(-20px, 10px) scale(0.95); }
+}
