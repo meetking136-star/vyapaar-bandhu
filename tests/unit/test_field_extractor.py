@@ -64,11 +64,26 @@ Invoice No: INV-2024-001
         assert fields.gstin_supplier == "27AAPFU0939F1ZV"
         assert fields.gstin_recipient == "33AADCS0472N1Z5"
 
-    def test_place_of_supply_derived(self):
-        """Place of supply is derived from supplier GSTIN first 2 digits."""
-        text = "GSTIN: 29AABCU9603R1ZM"
+    def test_place_of_supply_from_recipient_gstin(self):
+        """Place of supply is derived from recipient GSTIN first 2 digits."""
+        text = """Seller GSTIN: 27AAPFU0939F1ZV
+Buyer GSTIN: 29AABCU9603R1ZM"""
         fields = extract_fields_from_raw(text)
         assert fields.place_of_supply == "29"
+
+    def test_place_of_supply_b2c_fallback(self):
+        """B2C invoice (no recipient GSTIN): place of supply from text."""
+        text = """GSTIN: 27AAPFU0939F1ZV
+Place of Supply: 33
+Total: 1000.00"""
+        fields = extract_fields_from_raw(text)
+        assert fields.place_of_supply == "33"
+
+    def test_place_of_supply_b2c_no_text(self):
+        """B2C invoice with no place of supply in text returns None."""
+        text = "GSTIN: 29AABCU9603R1ZM"
+        fields = extract_fields_from_raw(text)
+        assert fields.place_of_supply is None
 
     def test_no_gstin_returns_none(self):
         """No GSTIN in text returns None."""

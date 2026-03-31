@@ -85,7 +85,11 @@ async def upload_invoice(
         raise HTTPException(status_code=404, detail="Client not found or not owned by this CA")
 
     # Assert client consent (DPDP Act -- RULE 5)
-    await assert_client_consent(db, client_id)
+    from app.utils.consent import ConsentNotGivenError, ConsentWithdrawnError
+    try:
+        await assert_client_consent(db, client_id)
+    except (ConsentNotGivenError, ConsentWithdrawnError) as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
     # Upload raw file to S3
     s3_key = await upload_invoice_image(file_bytes, client_id)

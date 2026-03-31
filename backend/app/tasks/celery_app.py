@@ -66,7 +66,7 @@ celery_app.conf.update(
 
     # ── Task routing ───────────────────────────────────────────────
     task_routes={
-        "app.tasks.ocr_task.*": {"queue": "ocr"},
+        "app.tasks.ocr_tasks.*": {"queue": "ocr"},
         "app.tasks.reminder_task.*": {"queue": "default"},
         "app.tasks.summary_task.*": {"queue": "default"},
     },

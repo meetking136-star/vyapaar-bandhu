@@ -163,9 +163,13 @@ def extract_fields_from_raw(text: str) -> ExtractedFields:
     if len(gstins) >= 2:
         fields.gstin_recipient = gstins[1]
 
-    # Derive place of supply from supplier GSTIN
-    if fields.gstin_supplier and len(fields.gstin_supplier) >= 2:
-        fields.place_of_supply = fields.gstin_supplier[:2]
+    # Derive place of supply from recipient GSTIN (buyer's state).
+    # For B2C invoices (no recipient GSTIN), fall back to explicit
+    # "Place of Supply" text in the invoice, then leave None.
+    if fields.gstin_recipient and len(fields.gstin_recipient) >= 2:
+        fields.place_of_supply = fields.gstin_recipient[:2]
+    else:
+        fields.place_of_supply = _extract_place_of_supply(text)
 
     # 2. Invoice number
     for pattern in INVOICE_NO_PATTERNS:
@@ -368,6 +372,19 @@ def _extract_description(lines: list[str]) -> str | None:
 
     # Return the longest candidate (most descriptive)
     return max(candidates, key=len)[:200]
+
+
+PLACE_OF_SUPPLY_RE = re.compile(
+    r"place\s+of\s+supply[\s.:]+(\d{2})", re.IGNORECASE
+)
+
+
+def _extract_place_of_supply(text: str) -> str | None:
+    """Extract place of supply state code from invoice text (B2C fallback)."""
+    match = PLACE_OF_SUPPLY_RE.search(text)
+    if match:
+        return match.group(1)
+    return None
 
 
 def _extract_hsn_codes(lines: list[str]) -> list[str]:

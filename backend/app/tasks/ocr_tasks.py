@@ -237,6 +237,13 @@ async def _process_invoice_async(
         invoice.is_itc_eligible_draft = evaluation.is_eligible
         invoice.blocked_reason = evaluation.blocked_reason
 
+        # Recalculate dedup hash now that we have real seller_gstin + invoice_number
+        from app.utils.dedup import compute_dedup_hash
+        invoice.dedup_hash = compute_dedup_hash(
+            fields.gstin_supplier, fields.invoice_number,
+            uuid.UUID(client_id), image_s3_key,
+        )
+
         # Status
         invoice.status = status
 
@@ -338,7 +345,7 @@ async def _async_reprocess_failed():
                 invoice_id=str(inv.id),
                 client_id=str(inv.client_id),
                 ca_id=str(inv.ca_id),
-                filing_period="",  # Not available for reprocessing
+                filing_period=inv.filing_period,
                 image_s3_key=inv.image_s3_key,
             )
             requeued += 1
