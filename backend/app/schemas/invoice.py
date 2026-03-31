@@ -1,6 +1,7 @@
 """
-VyapaarBandhu — Invoice Pydantic Schemas
+VyapaarBandhu -- Invoice Pydantic Schemas
 Request/response validation for invoice operations.
+Phase 3: Added upload, status, and OCR-related schemas.
 """
 
 import re
@@ -11,6 +12,43 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+
+# ── Phase 3: Upload & Status schemas ──────────────────────────────────
+
+class InvoiceUploadResponse(BaseModel):
+    """Response for POST /invoices/upload (202 Accepted)."""
+    invoice_id: uuid.UUID
+    status: str = "queued"
+    estimated_seconds: int = 30
+
+
+class InvoiceStatusResponse(BaseModel):
+    """Response for GET /invoices/{id}/status."""
+    invoice_id: uuid.UUID
+    status: str
+    extracted_fields: dict | None = None
+    confidence_scores: dict | None = None
+    low_confidence_fields: list[str] | None = None
+    classification: dict | None = None
+    is_rcm: bool = False
+    rcm_category: str | None = None
+    ocr_provider: str | None = None
+    processing_attempts: int = 0
+    last_error_message: str | None = None
+    created_at: datetime
+    processed_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class InvoiceRawURLResponse(BaseModel):
+    """Response for GET /invoices/{id}/raw."""
+    invoice_id: uuid.UUID
+    presigned_url: str
+    expires_in_seconds: int = 3600
+
+
+# ── Existing schemas (from Phase 2) ──────────────────────────────────
 
 class InvoiceResponse(BaseModel):
     id: uuid.UUID
@@ -99,6 +137,6 @@ class InvoiceConfirmation(BaseModel):
         if v is None:
             return None
         v = re.sub(r"[\x00-\x1f\x7f]", "", v)
-        if len(v) > 500:
-            raise ValueError("edit_value too long")
+        if len(v) > 200:
+            raise ValueError("Edit value too long (max 200 chars)")
         return v

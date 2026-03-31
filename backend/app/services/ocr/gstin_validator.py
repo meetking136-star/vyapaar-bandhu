@@ -1,10 +1,11 @@
 """
-VyapaarBandhu — GSTIN Validator with Modulo 36 Checksum
+VyapaarBandhu -- GSTIN Validator with Modulo 36 Checksum
 Refactored from the original gstin_validator.py to use dataclass output.
 
 Handles OCR confusion pairs (I/1, O/0, S/5, B/8, Z/2, G/6, A/4)
 and attempts single-character auto-correction.
 """
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
