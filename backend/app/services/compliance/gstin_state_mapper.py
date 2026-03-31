@@ -1,10 +1,11 @@
 """
-VyapaarBandhu — GSTIN to State Mapper
+VyapaarBandhu -- GSTIN to State Mapper
 Determines inter-state vs intra-state transactions from GSTIN first 2 digits.
 
 CRITICAL: This file must never import any ML/AI library.
-Reference: IGST Act Section 5 — Inter-state supply.
+Reference: IGST Act Section 5 -- Inter-state supply.
 """
+from __future__ import annotations
 
 STATE_CODES: dict[str, str] = {
     "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab",

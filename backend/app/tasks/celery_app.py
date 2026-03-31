@@ -53,6 +53,15 @@ celery_app.conf.update(
                 "minute": 0,
             },
         },
+        "daily-reprocess-failed-invoices": {
+            "task": "app.tasks.ocr_tasks.reprocess_failed_invoices",
+            "schedule": {
+                # 20:30 UTC = 2:00 AM IST
+                "__type__": "crontab",
+                "hour": 20,
+                "minute": 30,
+            },
+        },
     },
 
     # ── Task routing ───────────────────────────────────────────────
